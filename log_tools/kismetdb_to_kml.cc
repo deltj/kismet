@@ -156,6 +156,7 @@ std::string WifiCryptToString(unsigned long cryptset) {
 class kml_point {
 public:
     double lat, lon, alt;
+    long ts_sec;
 };
 
 // Placemark cache
@@ -187,6 +188,7 @@ void print_help(char *argv) {
            "                              your home, or other sensitive locations.\n"
            " --basic-location             Use basic average location information instead of computing a\n"
            "                              high-precision location; faster, but less accurate\n"
+           " -t, --track                  Use gx:Track to output device location history\n"
           );
 }
 
@@ -200,6 +202,7 @@ int main(int argc, char *argv[]) {
         { "skip-clean", no_argument, 0, 's' },
         { "exclude", required_argument, 0, 'e'},
         { "basic-location", no_argument, 0, 'B'},
+        { "track", no_argument, 0, 't' },
         { 0, 0, 0, 0 }
     };
 
@@ -212,6 +215,7 @@ int main(int argc, char *argv[]) {
     bool force = false;
     bool skipclean = false;
     bool basiclocation = false;
+    bool track = false; //  If true, use gx:Track
 
     std::vector<std::tuple<double, double, double>> exclusion_zones;
 
@@ -225,7 +229,7 @@ int main(int argc, char *argv[]) {
 
     while (1) {
         int r = getopt_long(argc, argv, 
-                            "-hi:o:r:c:e:vfs", 
+                            "-hi:o:r:c:e:vfst", 
                             longopt, &option_idx);
         if (r < 0) break;
 
@@ -253,6 +257,8 @@ int main(int argc, char *argv[]) {
             exclusion_zones.push_back(std::make_tuple(lat, lon, distance));
         } else if (r == 'B') {
             basiclocation = true;
+        } else if (r == 't') {
+            track = true;
         }
     }
 
@@ -482,9 +488,9 @@ int main(int argc, char *argv[]) {
             std::list<std::string> packet_fields;
 
             if (db_version < 5) {
-                packet_fields = std::list<std::string>{"lat", "lon" };
+                packet_fields = std::list<std::string>{"lat", "lon", "ts_sec"};
             } else {
-                packet_fields = std::list<std::string>{"lat", "lon", "alt"};
+                packet_fields = std::list<std::string>{"lat", "lon", "alt", "ts_sec"};
             }
 
             auto phyname = sqlite3_column_as<std::string>(d, 0);
@@ -512,18 +518,22 @@ int main(int argc, char *argv[]) {
             auto packet_q = _SELECT(db, "packets", packet_fields,
                     _WHERE("sourcemac", EQ, devmac, AND, "phyname", EQ, phyname, AND, "lat", NEQ, 0, AND, "lon", NEQ, 0));
 
+            unsigned long long location_count = 0;
             for (auto p : packet_q) {
-                double lat, lon, alt;
+                location_count++;
+                double lat, lon, alt, ts_sec;
 
                 // Handle the different versions
                 if (db_version < 5) {
                     lat = sqlite3_column_as<double>(p, 0) / 100000;
                     lon = sqlite3_column_as<double>(p, 1) / 100000;
                     alt = 0;
+                    ts_sec = sqlite3_column_as<long>(p, 2);
                 } else {
                     lat = sqlite3_column_as<double>(p, 0);
                     lon = sqlite3_column_as<double>(p, 1);
                     alt = sqlite3_column_as<double>(p, 2);
+                    ts_sec = sqlite3_column_as<long>(p, 3);
                 }
 
                 // Check to see if we lie in any exclusion zones
@@ -539,13 +549,22 @@ int main(int argc, char *argv[]) {
                     continue;
                 }
 
-                pl.avg_lat += lat;
-                pl.avg_lon += lon;
-                pl.avg_2d_num++;
+                if (track) {
+                    kml_point p;
+                    p.lat = lat;
+                    p.lon = lon;
+                    p.alt = alt;
+                    p.ts_sec = ts_sec;
+                    pl.point_vec.push_back(p);
+                } else {
+                    pl.avg_lat += lat;
+                    pl.avg_lon += lon;
+                    pl.avg_2d_num++;
 
-                if (alt != 0) {
-                    pl.avg_alt += alt;
-                    pl.avg_alt_num++;
+                    if (alt != 0) {
+                        pl.avg_alt += alt;
+                        pl.avg_alt_num++;
+                    }
                 }
             }
 
@@ -553,17 +572,20 @@ int main(int argc, char *argv[]) {
                     _WHERE("devmac", EQ, devmac, AND, "phyname", EQ, phyname, AND, "lat", NEQ, 0, AND, "lon", NEQ, 0));
 
             for (auto p : data_q) {
-                double lat, lon, alt;
+                location_count++;
+                double lat, lon, alt, ts_sec;
 
                 // Handle the different versions
                 if (db_version < 5) {
                     lat = sqlite3_column_as<double>(p, 0) / 100000;
                     lon = sqlite3_column_as<double>(p, 1) / 100000;
                     alt = 0;
+                    ts_sec = sqlite3_column_as<long>(p, 2);
                 } else {
                     lat = sqlite3_column_as<double>(p, 0);
                     lon = sqlite3_column_as<double>(p, 1);
                     alt = sqlite3_column_as<double>(p, 2);
+                    ts_sec = sqlite3_column_as<long>(p, 3);
                 }
 
                 // Check to see if we lie in any exclusion zones
@@ -579,29 +601,42 @@ int main(int argc, char *argv[]) {
                     continue;
                 }
 
-                pl.avg_lat += lat;
-                pl.avg_lon += lon;
-                pl.avg_2d_num++;
+                if (track) {
+                    kml_point p;
+                    p.lat = lat;
+                    p.lon = lon;
+                    p.alt = alt;
+                    p.ts_sec = ts_sec;
+                    pl.point_vec.push_back(p);
+                } else {
+                    pl.avg_lat += lat;
+                    pl.avg_lon += lon;
+                    pl.avg_2d_num++;
 
-                if (alt != 0) {
-                    pl.avg_alt += alt;
-                    pl.avg_alt_num++;
+                    if (alt != 0) {
+                        pl.avg_alt += alt;
+                        pl.avg_alt_num++;
+                    }
                 }
             }
 
-            if (pl.avg_2d_num == 0) {
+            if (location_count == 0) {
                 fmt::print(stderr, "WARNING:  No packets with GPS info for '{}', skipping\n", pl.name);
                 continue;
             }
 
-            kml_point p;
-            p.lat = pl.avg_lat / pl.avg_2d_num;
-            p.lon = pl.avg_lon / pl.avg_2d_num;
+            if (!track) {
+                //  Not tracking, add the averaged location to the point vector
+                kml_point p;
+                p.lat = pl.avg_lat / pl.avg_2d_num;
+                p.lon = pl.avg_lon / pl.avg_2d_num;
 
-            if (pl.avg_alt_num)
-                p.alt = pl.avg_alt / pl.avg_alt_num;
+                if (pl.avg_alt_num)
+                    p.alt = pl.avg_alt / pl.avg_alt_num;
 
-            pl.point_vec.push_back(p);
+                pl.point_vec.push_back(p);
+            }
+
             placemark_vec.push_back(pl);
         }
     }
@@ -616,11 +651,29 @@ int main(int argc, char *argv[]) {
             "<name>Kismet</name>\n");
 
     for (auto pl : placemark_vec) {
-        fmt::print(ofile, "<Placemark id=\"{}\">", place_num++);
-        fmt::print(ofile, "<name>{}</name>", MungeForXML(pl.name));
-        for (auto p : pl.point_vec) 
-            fmt::print(ofile, "<Point id=\"{}\"><coordinates>{},{},{}</coordinates></Point>",
-                    point_num++, p.lon, p.lat, p.alt);
+        fmt::print(ofile, "<Placemark id=\"{}\">\n", place_num++);
+        fmt::print(ofile, "<name>{}</name>\n", MungeForXML(pl.name));
+
+        if (track) {
+            fmt::print(ofile, "<gx:Track>\n");
+
+            char ts[25];
+            for (auto p : pl.point_vec) {
+                memset(ts, 0, 25);
+                strftime(ts, 25, "%Y-%m-%dT%H:%M:%SZ", localtime(&p.ts_sec));
+                fmt::print(ofile, "<when>{}</when>\n", ts);
+            }
+
+            for (auto p : pl.point_vec)
+                fmt::print(ofile, "<gx:coord>{} {} {}</gx:coord>\n",
+                    p.lon, p.lat, p.alt);
+                    
+            fmt::print(ofile, "</gx:Track>\n");
+        } else {
+            for (auto p : pl.point_vec) 
+                fmt::print(ofile, "<Point id=\"{}\"><coordinates>{},{},{}</coordinates></Point>\n",
+                        point_num++, p.lon, p.lat, p.alt);
+        }
         fmt::print(ofile, "</Placemark>\n");
     }
 
